@@ -1,0 +1,84 @@
+service: triaje-inteligente
+
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: python3.9
+  region: us-east-1
+  stage: dev
+  # Reutilizamos el LabRole con permisos amplios de AWS Academy
+  iam:
+    role: arn:aws:iam::322876131322:role/LabRole
+
+functions:
+  # 1. Tu Lambda actual de Ingesta
+  dispatcher:
+    handler: handler.process_csv
+    events:
+      - s3:
+          bucket: bucket-reclamos-triaje-${sls:stage}
+          event: s3:ObjectCreated:*
+          rules:
+            - suffix: .csv
+
+  # 2. NUEVA LAMBDA: Capa de Acceso de Datos (GET /reclamos)
+  getReclamos:
+    handler: handler.get_reclamos
+    description: Expone los reclamos procesados desde DynamoDB para el frontend
+    events:
+      - http:
+          path: reclamos
+          method: get
+          cors: true # Permite llamadas desde tu app Next.js sin problemas de políticas CORS
+
+resources:
+  Resources:
+    # --- MENSAJERÍA SQS ---
+    ReclamosQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ReclamosQueue-${sls:stage}
+        VisibilityTimeout: 60
+
+    # --- SEGURIDAD WORKER EC2 ---
+    WorkerSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Permitir SSH al Worker EC2
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: 0.0.0.0/0
+
+    # --- EL WORKER (EC2) ---
+    WorkerEC2Instance:
+      Type: AWS::EC2::Instance
+      Properties:
+        ImageId: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+        InstanceType: t2.micro
+        IamInstanceProfile: LabInstanceProfile
+        SecurityGroupIds:
+          - Ref: WorkerSecurityGroup
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            dnf update -y
+            dnf install -y python3 python3-pip git
+            pip3 install boto3 requests
+
+    # --- NUEVO RECURSO: TOPIC DE SNS (Fan-Out) ---
+    AlertasUrgentesTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: AlertasUrgentesTopic-${sls:stage}
+
+    # --- SUSCRIPCIÓN AL TOPIC ---
+    # Coloca tu correo real aquí abajo para recibir las alertas del triaje en tiempo real
+    AlertasEmailSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Endpoint: tu-correo-aqui@dominio.com  # <--- REEMPLAZA CON TU CORREO
+        Protocol: email
+        TopicArn: !Ref AlertasUrgentesTopic
