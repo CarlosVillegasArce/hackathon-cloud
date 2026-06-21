@@ -1,0 +1,111 @@
+service: sari-sistema-reclamos
+
+# Indicamos a Serverless que use el .env local automáticamente
+useDotenv: true
+
+provider:
+  name: aws
+  runtime: python3.11
+  stage: dev
+  region: us-east-1
+  
+  # Estas variables vivirán dentro de tus Lambdas (os.environ.get(...))
+  environment:
+    SQS_QUEUE_URL: !Ref SariReclamosQueue
+    DYNAMODB_TABLE: !Ref SariReclamosTable
+    GROQ_API_KEY: ${env:GROQ_API_KEY} # Lo extrae de tu archivo .env
+    GROQ_MODEL: "llama-3.1-8b-instant"
+
+  # Permisos exactos para que tus Lambdas toquen S3, SQS y DynamoDB
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+          Resource: "arn:aws:s3:::sari-archivos-reclamos-dev/*"
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource: !GetAtt SariReclamosQueue.Arn
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:BatchWriteItem
+          Resource: 
+            - !GetAtt SariReclamosTable.Arn
+            - "arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/${self:provider.environment.DYNAMODB_TABLE}/index/*"
+
+functions:
+  despachador:
+    handler: sari-lambda-despachador.lambda_handler
+    memorySize: 256
+    timeout: 60
+    events:
+      - s3:
+          bucket: sari-archivos-reclamos-dev # El framework creará este bucket
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: uploads/ # Así no se rompe tu parts[1] del código Python
+            - suffix: .csv
+
+  procesamiento:
+    # OJO: Tu archivo Python debe llamarse exactamente sari-lambda-procesamiento.py
+    handler: sari-lambda-procesamiento.lambda_handler
+    memorySize: 256
+    timeout: 90
+    events:
+      - sqs:
+          arn: !GetAtt SariReclamosQueue.Arn
+          batchSize: 1
+          functionResponseType: ReportBatchItemFailures
+
+resources:
+  Resources:
+    # --- COLA SQS ---
+    SariReclamosQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: sari-reclamos-queue-dev
+        VisibilityTimeout: 300
+
+    # --- TABLA DYNAMODB ---
+    SariReclamosTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: sari-reclamos-procesados-dev
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+          - AttributeName: area_derivada
+            AttributeType: S
+          - AttributeName: urgencia
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: gsi_area_pk
+            KeySchema:
+              - AttributeName: area_derivada
+                KeyType: HASH
+              - AttributeName: pk
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: gsi_urgencia_pk
+            KeySchema:
+              - AttributeName: urgencia
+                KeyType: HASH
+              - AttributeName: pk
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
